@@ -1,0 +1,150 @@
+import cv2
+import pygame
+import os
+import tkinter as tk
+from PIL import Image, ImageTk
+from ultralytics import YOLO
+
+# Initialize pygame mixer for sound
+pygame.mixer.init()
+
+# Absolute path to siren sound file (change this if needed)
+siren_sound_path = 'C:\\Users\\Sangeetha\\Downloads\\siren_wav.mp3'
+
+# Check if the sound file exists
+if not os.path.exists(siren_sound_path):
+    print(f"Error: The sound file '{siren_sound_path}' was not found!")
+    exit()
+
+try:
+    siren_sound = pygame.mixer.Sound(siren_sound_path)
+    print("Siren sound loaded successfully.")
+except pygame.error as e:
+    print(f"Error loading sound file: {e}")
+    exit()
+
+# Load the YOLOv5 model
+model = YOLO('yolov5s.pt')  # Change this if you have a custom-trained model
+
+# Print class names in the model to help debug
+print("Classes detected by YOLO:", model.names)
+
+# Define the classes considered as weapons (based on your model's classes)
+WEAPON_CLASSES = ['knife', 'gun', 'pistol', 'rifle']
+PERSON_CLASS = 'person'
+
+# Start webcam capture
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Error: Could not access the camera.")
+    exit()
+
+# Load Haar cascade for face detection
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+weapon_detected = False
+frame_count = 0  # For frame skipping
+
+def detect_weapon_and_person(frame):
+    global weapon_detected
+
+    # Resize frame for faster detection (optional)
+    resized_frame = cv2.resize(frame, (640, 480))
+    rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+
+    results = model(rgb_frame)
+    current_weapon_detected = False
+
+    if results and results[0].boxes is not None:
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = box.xyxy[0]
+            conf = box.conf[0]
+            cls = int(box.cls[0])
+            label = model.names[cls]
+
+            if label.lower() in WEAPON_CLASSES:
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
+                cv2.putText(frame, f'{label} {conf:.2f}', (int(x1), int(y1) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                current_weapon_detected = True
+
+            elif label.lower() == PERSON_CLASS:
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 255, 0), 2)
+
+    # Siren control
+    if current_weapon_detected and not weapon_detected:
+        print("Weapon detected! Siren activated!")
+        if not pygame.mixer.get_busy():
+            siren_sound.play(loops=-1)
+        weapon_detected = True
+    elif not current_weapon_detected and weapon_detected:
+        print("No weapon detected. Siren stopped.")
+        if pygame.mixer.get_busy():
+            siren_sound.stop()
+        weapon_detected = False
+
+    return frame
+
+
+def detect_face(frame):
+    """Draw rectangles around faces."""
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+    for (x, y, w, h) in faces:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
+
+    return frame
+
+
+def update_frame():
+    global frame_count
+
+    ret, frame = cap.read()
+    if ret:
+        frame_count += 1
+
+        # Only run detection every 3rd frame to reduce load
+        if frame_count % 3 == 0:
+            frame = detect_weapon_and_person(frame)
+
+        frame = detect_face(frame)
+
+        # Convert to Tkinter-compatible image
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(img_rgb)
+        img_tk = ImageTk.PhotoImage(img_pil)
+
+        canvas.create_image(0, 0, anchor=tk.NW, image=img_tk)
+        canvas.image = img_tk
+
+    window.after(10, update_frame)
+
+
+def stop_camera():
+    """Gracefully stop camera and GUI."""
+    print("Stopping camera feed.")
+    cap.release()
+    if pygame.mixer.get_busy():
+        siren_sound.stop()
+    cv2.destroyAllWindows()
+    window.quit()
+
+# Initialize Tkinter window
+window = tk.Tk()
+window.title("Weapon Detection System")
+window.protocol("WM_DELETE_WINDOW", stop_camera)  # Handle window close
+
+canvas = tk.Canvas(window, width=640, height=480)
+canvas.pack()
+
+stop_button = tk.Button(window, text="Stop", width=10, command=stop_camera)
+stop_button.pack()
+
+update_frame()
+window.mainloop()
+
+# Cleanup
+cap.release()
+cv2.destroyAllWindows()
+
